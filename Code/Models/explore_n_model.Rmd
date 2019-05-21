@@ -1,0 +1,1003 @@
+---
+title: "R Notebook  --  Exploring/Predicting Hard Drive Failure"
+output: html_notebook
+---
+
+Data Originally from Kaggle at:  [https://www.kaggle.com/backblaze/hard-drive-test-data](https://www.kaggle.com/backblaze/hard-drive-test-data).
+
+But after experiencing issues with 64bit values, the data were obtained from the original source here:  [https://www.backblaze.com/b2/hard-drive-test-data.html](https://www.backblaze.com/b2/hard-drive-test-data.html).  
+
+
+## Setup    
+  Load the relevant libraries.
+```{r message=FALSE, warning=FALSE}
+# {r, message=FALSE, warning=FALSE}
+
+# rm(list = ls())
+# .rs.restartR()
+
+
+# data munging
+library("tidyverse")
+library("data.table")
+
+# munge dates
+library("lubridate")
+
+# feature engineering and data prep
+library("recipes")
+
+# to explore missing data
+library("visdat")
+library("naniar")
+
+# modeling
+library("caret")
+library("DMwR")
+library("h2o")
+
+```
+  
+    
+  Session Info.
+```{r}
+
+sessionInfo()
+
+```
+
+
+  Setup the root directory.
+```{r "setup", include = FALSE}
+
+require("knitr")
+
+opts_knit$set(root.dir = "/Users/mdturse/Desktop/Analytics/Sparkfund/")
+
+```
+  
+    
+  Setting `wd` as the working directory.
+```{r}
+
+wd <- getwd()
+
+wd
+
+```
+
+
+## Get the data  
+  
+  The site where the data are made available is [https://www.backblaze.com/b2/hard-drive-test-data.html](https://www.backblaze.com/b2/hard-drive-test-data.html).  
+    
+  Download the .zip file.
+```{r}
+
+# base url
+url <- "https://f001.backblazeb2.com/file/Backblaze-Hard-Drive-Data/data_Q4_2018.zip"
+
+
+# create a temporary directory
+td <- tempdir()
+
+
+# create the placeholder file
+tf <- tempfile(tmpdir = td, fileext = ".zip")
+
+
+# download into the placeholder file
+download.file(url, tf)
+
+```
+  
+    
+  Download just the relevant .csv files.
+```{r message=FALSE}
+
+# get the names of the files
+fname <- unzip(tf, list = TRUE)
+head(fname)
+
+fname_csv <- 
+  fname %>% 
+  filter(str_detect(Name, "data_Q4_2018/2018-\\d{2}-\\d{2}\\.csv$")) %>% 
+  arrange(Name) %>% 
+  # head(5) %>%
+  pull(Name)
+
+
+# unzip the files to the temporary directory
+fname_csv %>% 
+  map(~unzip(tf,
+             files = .x,
+             exdir = td,
+             overwrite = TRUE
+             )
+      )
+
+
+# fpath is the full path to the extracted files
+fpath <-
+  fname_csv %>% 
+  map(~file.path(td, .x)
+      )
+
+```
+  
+    
+  Read in the .csv files and save it as one .rds file.
+```{r message=FALSE}
+
+hd <-
+  fpath %>% 
+  map(~fread(.x, verbose = FALSE)
+      )
+
+
+hd_dt <- bind_rows(hd)
+
+
+# fwrite(hd_dt,
+#        paste0(wd,
+#                "/Data/Interim/",
+#                "hd_dt.csv"
+#                )
+#        )
+
+# saveRDS(hd_dt,
+#         paste0(wd,
+#                "/Data/Interim/",
+#                "hd_dt.Rds"
+#                )
+#         )
+
+# hd_dt <-
+#   readRDS(paste0(wd,
+#                  "/Data/Interim/",
+#                  "hd_dt.Rds"
+#                  )
+#           )
+
+
+# message("hd")
+# class(hd)
+# glimpse(hd[1])
+# 
+# message("hd_dt")
+# glimpse(hd_dt)
+
+
+rm(fname, fpath, fname_csv, td, tf, url, hd)
+
+```
+  
+    
+  Experimenting with converting `integer64` values to smaller numeric values.
+```{r}
+
+# class(hd_dt)
+# hd_dt2 <- hd_dt
+
+# 12,000,138,625,024
+# hd_dt$capacity_bytes <- as.numeric(hd_dt$capacity_bytes / 1000000)# * 1000000
+# hd_dt$smart_7_raw <- as.numeric(hd_dt$smart_7_raw / 1000000)# * 1000000
+# hd_dt$smart_188_raw <- as.numeric(hd_dt$smart_188_raw / 1000000)# * 1000000
+# hd_dt$smart_240_raw <- as.numeric(hd_dt$smart_240_raw / 1000000)# * 1000000
+# hd_dt$smart_241_raw <- as.numeric(hd_dt$smart_241_raw / 1000000)# * 1000000
+# hd_dt$smart_242_raw <- as.numeric(hd_dt$smart_242_raw / 1000000)# * 1000000
+
+# class(hd_dt)
+# glimpse(hd_dt)
+
+# hd_dt$capacity_bytes3 <- as.integer(hd_dt$capacity_bytes)
+
+```
+
+
+## Data Prep  
+  
+  Separate model into pieces - manufacturer and model.
+```{r}
+
+hd2 <-
+  hd_dt %>% 
+  # head(1000) %>%
+  separate(col = model,
+           into = c("manu", "model2"),
+           sep = "\\s",
+           fill = "left",
+           remove = TRUE
+           ) %>%
+  mutate(date = as_date(date),
+         serial_number = factor(serial_number),
+         manu = case_when(is.na(manu) ~ "(Missing)",
+                          TRUE ~ manu
+                          ) %>% 
+           factor(),
+         model2 = factor(model2),
+         failure = factor(failure)
+         ) %>% 
+  select(-matches("normalized")
+         ) %>% 
+  as.data.table %>% 
+  setkey(manu, model2, serial_number, date)
+
+
+class(hd2)
+glimpse(hd2)
+summary(hd2)
+
+# View(hd2 %>% filter(model2 == "HDS5C3030ALA630"))
+# View(head(hd2, 1000))
+
+```
+  
+    
+  Get some basic counts for manufacturer, model, and serial number.
+```{r}
+
+hd2 %>% 
+  count(manu, model2, serial_number) %>% 
+  arrange(desc(n))
+
+# View(hd2 %>% filter(model == "13H2B97AS"))
+
+
+hd2 %>% 
+  count(manu) %>% 
+  arrange(desc(n))
+
+hd2 %>% 
+  count(model2) %>% 
+  arrange(desc(n))
+
+```
+  
+    
+  Explore failure rates.
+```{r}
+
+table(hd2$failure)
+prop.table(table(hd2$failure))
+
+cnts_manu <-
+  hd2 %>% 
+  count(manu)
+  
+cnts_manu_failure <-
+  hd2 %>% 
+  filter(failure == "1") %>% 
+  count(manu)
+
+manu_failures <-
+  cnts_manu %>% 
+  rename(cnt_overall = n) %>% 
+  inner_join(y = cnts_manu_failure %>% 
+               rename(cnt_failure = n),
+             by = c("manu" = "manu")
+             ) %>% 
+  mutate(failure_pct = cnt_failure / cnt_overall) %>% 
+  arrange(desc(failure_pct))
+  
+manu_failures
+
+
+rm(cnts_manu, cnts_manu_failure)
+
+```
+
+
+## Explore modeling just for Toshiba  
+   
+  Create train_valid and test datasets.
+```{r}
+
+toshiba <-
+  hd2 %>% 
+  filter(manu == "TOSHIBA") %>% 
+  mutate_if(is.factor, factor) %>% 
+  select_if(negate(is.logical))
+
+
+fwrite(toshiba,
+       paste0(wd,
+              "/Data/Interim/",
+              "toshiba.csv"
+              )
+       )
+
+# toshiba <-
+#   fread(paste0(wd,
+#                  "/Data/Interim/",
+#                  "toshiba.csv"
+#                  )
+#           )
+
+# toshiba[ , date := as_date(date)]
+# toshiba[ , serial_number := factor(serial_number)]
+# toshiba[ , manu := factor(manu)]
+# toshiba[ , model2 := factor(model2)]
+
+
+str(toshiba)
+summary(toshiba)
+  
+```
+
+
+### Feature Engineering  
+    
+  One-hot encode the data.
+```{r}
+
+message("toshiba")
+str(toshiba)
+
+one_hot <- dummyVars(failure ~ .,
+                     data = toshiba %>% 
+                       select(-date,
+                              -serial_number,
+                              -manu
+                              ) %>%
+                       select_if(negate(is.logical)
+                                 )
+                     )
+
+
+toshiba_one_hot <-
+  toshiba %>% 
+  select(failure,
+         date,
+         # serial_number,
+         manu) %>% 
+  bind_cols(predict(object = one_hot,
+                    newdata = toshiba %>% 
+                      select(-date,
+                             -serial_number,
+                             -manu
+                             ) %>%
+                       select_if(negate(is.logical)
+                                 )
+                    ) %>% 
+              as.data.frame()
+            )
+
+message("toshiba_one_hot")
+str(toshiba_one_hot)
+summary(toshiba_one_hot)
+
+
+rm(one_hot, toshiba)
+
+```
+  
+    
+  Create separate train_valid and the test data sets.
+```{r}
+
+set.seed(123456789)
+train_index <-
+  createDataPartition(y = toshiba_one_hot$failure,
+                      p = .70,
+                      times = 1,
+                      list = FALSE
+                      )
+
+
+hd2_train_valid <-
+  toshiba_one_hot[train_index, ] %>% 
+  select(-date)
+
+hd2_test <-
+  toshiba_one_hot[-train_index, ] %>%
+  select(-date)
+
+```
+  
+    
+  Create separate train and valid datasets.
+```{r}
+
+set.seed(123456789)
+train_index <-
+  createDataPartition(y = hd2_train_valid$failure,
+                      p = .70,
+                      times = 1,
+                      list = FALSE
+                      )
+
+
+hd2_train <- hd2_train_valid[train_index, ]
+hd2_valid <- hd2_train_valid[-train_index, ]
+
+message("hd2_train$failure")
+table(hd2_train$failure)
+prop.table(table(hd2_train$failure))
+class(hd2_train)
+glimpse(hd2_train)
+
+```
+  
+    
+  Use the `recipe` package for multiple feature engineering steps.
+```{r}
+
+# create the recipe object
+rec_obj <- recipe(failure ~ ., data = hd2_train)
+
+
+# implement each recipe step
+rec_steps <-
+  rec_obj %>% 
+  step_shuffle(all_predictors()) %>% 
+  step_nzv(all_predictors()) %>%  # helps reduce the number of variables with many NA values
+  # step_sqrt(all_numeric()) %>%  # puts less emphasis on "outliers"
+  step_log(all_predictors(), offset = 1) %>%  # puts less emphasis on "outliers"
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors()) %>% 
+  step_medianimpute(all_predictors())
+
+rec_steps
+
+
+# create the recipe based on the TRAIN data set
+trained_rec <- prep(rec_steps, training = hd2_train)
+
+trained_rec
+
+
+# apply the recipe to the the train, valid, and test datasets
+train_data <- bake(trained_rec, new_data = hd2_train)
+valid_data  <- bake(trained_rec, new_data = hd2_valid)
+test_data  <- bake(trained_rec, new_data = hd2_test)
+
+
+# View(hd2_train %>% head(1000))
+# View(train_data %>% head(1000))
+
+
+message("train_data")
+dim(train_data)
+str(train_data)
+summary(train_data)
+
+message("valid_data")
+summary(valid_data)
+
+message("test_data")
+summary(test_data)
+
+```
+  
+    
+  Add `weight_col`, as this is a potential parameter to be used. The vlaue of 100 is arbitrarily chosen to make predicting `failure` more important than `non_failure`.
+```{r}
+
+train_data <-
+  train_data %>%
+  mutate(weight_col = case_when(failure == 1 ~ 100,
+                                failure == 0 ~ 1,
+                                TRUE ~ 0
+                                )
+         )
+
+valid_data <-
+  valid_data %>%
+  mutate(weight_col = case_when(failure == 1 ~ 100,
+                                failure == 0 ~ 1,
+                                TRUE ~ 0
+                                )
+         )
+
+test_data <-
+  test_data %>%
+  mutate(weight_col = case_when(failure == 1 ~ 100,
+                                failure == 0 ~ 1,
+                                TRUE ~ 0
+                                )
+         )
+
+message("train_data")
+dim(train_data)
+summary(train_data)
+
+message("valid_data")
+summary(valid_data)
+
+message("test_data")
+summary(test_data)
+
+```
+  
+    
+  Explore missing data, and remove any variables where more more than 50% of the values are missing.
+```{r}
+
+# Visualize missing data
+vis_miss(train_data %>% sample_frac(size = .10))
+miss_var_summary(train_data)
+
+
+# Remove variables where more than 50% of the values are missing. This is done for train, valid, and test datasets.
+miss_50pct_below <-
+  miss_var_summary(train_data) %>% 
+  filter(pct_miss <= 50) %>% 
+  pull(variable)
+
+miss_50pct_below
+
+
+train_data <-
+  train_data %>%
+  select(one_of(miss_50pct_below)
+         )
+
+valid_data <-
+  valid_data %>%
+  select(one_of(miss_50pct_below)
+         )
+
+test_data <-
+  test_data %>%
+  select(one_of(miss_50pct_below)
+         )
+
+
+dim(train_data)
+dim(valid_data)
+dim(test_data)
+
+```
+  
+    
+  Use `DMwR::SMOTE` to rebalance the clasess of `failure`.
+```{r}
+
+message("train_data$failure")
+str(train_data)
+summary(train_data)
+table(train_data$failure)
+prop.table(table(train_data$failure))
+
+set.seed(123456789)
+train_data_SMOTE <-
+  SMOTE(failure ~ .,
+        data  = as.data.frame(train_data),
+        k = 10,
+        perc.over = 100000,
+        perc.under = 1300
+        )
+
+message("train_data_SMOTE$failure")
+table(train_data_SMOTE$failure)
+prop.table(table(train_data_SMOTE$failure))
+class(train_data_SMOTE)
+glimpse(train_data_SMOTE)
+summary(train_data_SMOTE)
+
+```
+
+
+### Modeling with H2O  
+  
+  Start h2o.
+```{r}
+
+h2o.init()
+
+h2o.no_progress() # Turn off progress bars
+
+```
+  
+    
+  Convert to the datasets to h2o objects.
+```{r}
+
+# Multiple sets (train, train_no_weight, SMOTE, SMOTE_no_weight) are used to test the effects of these different datasets.
+train_h2o <- as.h2o(train_data)
+train_h2o_no_weight <- as.h2o(train_data %>% select(-weight_col))
+train_h2o_SMOTE <- as.h2o(train_data_SMOTE)
+train_h2o_SMOTE_no_weight <- as.h2o(train_data_SMOTE %>% select(-weight_col))
+
+valid_h2o <- as.h2o(valid_data)
+valid_h2o_no_weight <- as.h2o(valid_data %>% select(-weight_col))
+
+test_h2o  <- as.h2o(test_data)
+test_h2o_no_weight  <- as.h2o(test_data %>% select(-weight_col))
+
+
+# Save the data
+saveRDS(train_data,
+        paste0(wd,
+               "/Data/Processed/",
+               "train_data.rds"
+               )
+        )
+
+
+saveRDS(train_data %>% 
+          select(-weight_col),
+        paste0(wd,
+               "/Data/Processed/",
+               "train_data_no_weight.rds"
+               )
+        )
+
+
+saveRDS(valid_data,
+        paste0(wd,
+               "/Data/Processed/",
+               "valid_data.rds"
+               )
+        )
+
+saveRDS(valid_data %>% 
+          select(-weight_col),
+        paste0(wd,
+               "/Data/Processed/",
+               "valid_data_no_weight.rds"
+               )
+        )
+
+
+saveRDS(test_data,
+        paste0(wd,
+               "/Data/Processed/",
+               "test_data.rds"
+               )
+        )
+
+saveRDS(test_data %>% 
+          select(-weight_col),
+        paste0(wd,
+               "/Data/Processed/",
+               "test_data_no_weight.rds"
+               )
+        )
+
+```
+  
+    
+  Set the relevant variable names.
+```{r}
+
+y <- "failure"
+
+x <-
+  setdiff(names(train_h2o),
+  # setdiff(names(train_h2o_no_weight),
+  # setdiff(names(train_h2o_SMOTE),
+  # setdiff(names(train_h2o_SMOTE_no_weight),
+          y
+          )
+
+```
+  
+    
+  Run `h2o.automl`.  
+    
+  **NOTES**  
+    
+  1) `train_h2o` using `weight_col` & `balance_classes` = TRUE does not function - finds a quick "solution"  
+    
+  2) `train_h2o` NOT using `weight_col` & `balance_classes` = TRUE does function
+<!-- Confusion Matrix and Statistics -->
+
+<!--           Reference -->
+<!-- Prediction     0     1 -->
+<!--          0 53603     4 -->
+<!--          1  8229     2 -->
+
+<!--                Accuracy : 0.8669           -->
+<!--                  95% CI : (0.8642, 0.8695) -->
+<!--     No Information Rate : 0.9999           -->
+<!--     P-Value [Acc > NIR] : 1                -->
+
+<!--                   Kappa : 3e-04            -->
+
+<!--  Mcnemar's Test P-Value : <2e-16           -->
+
+<!--             Sensitivity : 3.333e-01        -->
+<!--             Specificity : 8.669e-01        -->
+<!--          Pos Pred Value : 2.430e-04        -->
+<!--          Neg Pred Value : 9.999e-01        -->
+<!--               Precision : 2.430e-04        -->
+<!--                  Recall : 3.333e-01        -->
+<!--                      F1 : 4.856e-04        -->
+<!--              Prevalence : 9.703e-05        -->
+<!--          Detection Rate : 3.234e-05        -->
+<!--    Detection Prevalence : 1.331e-01        -->
+<!--       Balanced Accuracy : 6.001e-01        -->
+
+<!--        'Positive' Class : 1  -->  
+  
+  **MODEL USED: 3) `train_h2o` using `weight_col` & `balance_classes` = FALSE**
+<!-- Confusion Matrix and Statistics -->
+
+<!--           Reference -->
+<!-- Prediction     0     1 -->
+<!--          0 43901     2 -->
+<!--          1 17931     4 -->
+
+<!--                Accuracy : 0.71             -->
+<!--                  95% CI : (0.7064, 0.7136) -->
+<!--     No Information Rate : 0.9999           -->
+<!--     P-Value [Acc > NIR] : 1                -->
+
+<!--                   Kappa : 3e-04            -->
+
+<!--  Mcnemar's Test P-Value : <2e-16           -->
+
+<!--             Sensitivity : 6.667e-01        -->
+<!--             Specificity : 7.100e-01        -->
+<!--          Pos Pred Value : 2.230e-04        -->
+<!--          Neg Pred Value : 1.000e+00        -->
+<!--               Precision : 2.230e-04        -->
+<!--                  Recall : 6.667e-01        -->
+<!--                      F1 : 4.459e-04        -->
+<!--              Prevalence : 9.703e-05        -->
+<!--          Detection Rate : 6.469e-05        -->
+<!--    Detection Prevalence : 2.900e-01        -->
+<!--       Balanced Accuracy : 6.883e-01        -->
+
+<!--        'Positive' Class : 1 -->  
+  
+  4) `train_h2o_SMOTE` using `weight_col` & `balance_classes` = FALSE
+<!-- Confusion Matrix and Statistics -->
+
+<!--           Reference -->
+<!-- Prediction     0     1 -->
+<!--          0 38668     3 -->
+<!--          1 23164     3 -->
+
+<!--                Accuracy : 0.6254           -->
+<!--                  95% CI : (0.6215, 0.6292) -->
+<!--     No Information Rate : 0.9999           -->
+<!--     P-Value [Acc > NIR] : 1                -->
+
+<!--                   Kappa : 1e-04            -->
+
+<!--  Mcnemar's Test P-Value : <2e-16           -->
+
+<!--             Sensitivity : 5.000e-01        -->
+<!--             Specificity : 6.254e-01        -->
+<!--          Pos Pred Value : 1.295e-04        -->
+<!--          Neg Pred Value : 9.999e-01        -->
+<!--               Precision : 1.295e-04        -->
+<!--                  Recall : 5.000e-01        -->
+<!--                      F1 : 2.589e-04        -->
+<!--              Prevalence : 9.703e-05        -->
+<!--          Detection Rate : 4.851e-05        -->
+<!--    Detection Prevalence : 3.746e-01        -->
+<!--       Balanced Accuracy : 5.627e-01        -->
+
+<!--        'Positive' Class : 1  -->  
+  
+  5) `train_h2o_SMOTE_no_weight` NOT using `weight_col` & `balance_classes` = TRUE
+<!-- Confusion Matrix and Statistics -->
+
+<!--           Reference -->
+<!-- Prediction     0     1 -->
+<!--          0  3899     0 -->
+<!--          1 57933     6 -->
+
+<!--                Accuracy : 0.0631           -->
+<!--                  95% CI : (0.0612, 0.0651) -->
+<!--     No Information Rate : 0.9999           -->
+<!--     P-Value [Acc > NIR] : 1                -->
+
+<!--                   Kappa : 0                -->
+
+<!--  Mcnemar's Test P-Value : <2e-16           -->
+
+<!--             Sensitivity : 1.000e+00        -->
+<!--             Specificity : 6.306e-02        -->
+<!--          Pos Pred Value : 1.036e-04        -->
+<!--          Neg Pred Value : 1.000e+00        -->
+<!--               Precision : 1.036e-04        -->
+<!--                  Recall : 1.000e+00        -->
+<!--                      F1 : 2.071e-04        -->
+<!--              Prevalence : 9.703e-05        -->
+<!--          Detection Rate : 9.703e-05        -->
+<!--    Detection Prevalence : 9.369e-01        -->
+<!--       Balanced Accuracy : 5.315e-01        -->
+
+<!--        'Positive' Class : 1   -->
+       
+```{r}
+
+# user   system  elapsed 
+#   22.355    7.826 1310.738
+# ~ 22 min
+
+start <- proc.time()
+automl_models_h2o <-
+  h2o.automl(x = x,
+             y = y,
+             training_frame = train_h2o,
+             # training_frame = train_h2o_SMOTE_no_weight,
+             validation_frame = valid_h2o,
+             leaderboard_frame = test_h2o,
+             nfolds = 10,
+             # balance_classes = TRUE,
+             balance_classes = FALSE,
+             weights_column = "weight_col",
+             max_runtime_secs = 3600, #3600, # 1 hour
+             # max_runtime_secs = 60, # 1 hour
+             max_models = 10,
+             # stopping_metric = "deviance", # ? AUTO ?
+             stopping_metric = "AUTO", # ? AUTO ?
+             seed = 123456789
+             )
+
+h2o.time <- proc.time() - start
+h2o.time
+
+
+rm(start)
+
+```
+  
+    
+  Pull out the "leader" model.
+```{r}
+
+automl_leader <- automl_models_h2o@leader
+
+automl_leader
+
+
+# save each individual model
+model_path_h2o <-
+   h2o.saveModel(object = automl_leader,
+                     path = paste0(wd,
+                                   "/Models/"
+                                   ),
+                     force = TRUE
+                     )
+
+
+saveRDS(model_path_h2o,
+        paste0(wd,
+               "/Models/",
+               "model_path_h2o.rds"
+               )
+        )
+
+
+
+# load the model
+# model_path_h2o <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "model_path_h2o.rds"
+#                          )
+#            )
+# 
+# print(model_path_h2o)
+# 
+# automl_leader <-
+#   h2o.loadModel(path = model_path_h2o)
+
+```
+  
+    
+  Inspect the leaderboard.
+```{r}
+
+automl_models_h2o@leaderboard
+
+```
+
+
+  Investigate variable importance of the leader model.
+```{r}
+
+leader_models_varimp <- h2o.varimp(object = automl_leader)
+
+leader_models_varimp_plot <- h2o.varimp_plot(model = automl_leader, num_of_features = 10)
+
+
+leader_models_varimp
+
+leader_models_varimp_plot
+
+```
+ 
+ 
+ Create predictions from the models.
+```{r}
+
+pred_h2o <- h2o.predict(automl_leader, newdata = test_h2o)
+
+
+# save as a .rds file
+saveRDS(pred_h2o,
+        paste0(wd,
+               "/Models/",
+               "pred_h2o.rds"
+               )
+        )
+
+# pred_h2o <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "pred_h2o.rds"
+#                          )
+#            )
+
+```
+  
+    
+  Look at performance stats using the test data.
+```{r}
+
+perf_stats_test_h2o <- h2o.performance(automl_leader, newdata = test_h2o)
+
+perf_stats_test_h2o
+
+
+# save as a .rds file
+saveRDS(perf_stats_test_h2o,
+        paste0(wd,
+               "/Models/",
+               "perf_stats_test_h2o.rds"
+               )
+        )
+
+# perf_stats_test_h2o <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "perf_stats_test_h2o.rds"
+#                          )
+#            )
+
+```
+  
+    
+  Investigate test error.
+```{r}
+
+error_tbl_h2o <-
+  test_data %>% 
+  bind_cols(pred_h2o %>% as_tibble()
+            ) %>% 
+  rename(obs = failure,
+         pred = predict
+         )
+
+
+confusionMatrix(data = error_tbl_h2o$pred,
+                reference = error_tbl_h2o$obs,
+                positive = "1",
+                mode = "everything"
+                )
+
+# twoClassSummary(data = error_tbl_h2o %>% select(obs, pred, p0, p1),
+#                 lev = levels(error_tbl_h2o$obs)
+#                 )
+
+# postResample(pred = error_tbl_h2o$pred,
+#              obs = error_tbl_h2o$obs
+#              )
+
+
+# save as a .rds file
+saveRDS(error_tbl_h2o,
+        paste0(wd,
+               "/Models/",
+               "error_tbl_h2o.rds"
+               )
+        )
+
+# error_tbl_h2o <-
+#   read_rds(path = paste0(wd,
+#                          "/Models/",
+#                          "error_tbl_h2o.rds"
+#                          )
+#            )
+
+```
+
+
