@@ -11,7 +11,6 @@ But after experiencing issues with 64bit values, the data were obtained from the
 ## Setup    
   Load the relevant libraries.
 ```{r message=FALSE, warning=FALSE}
-# {r, message=FALSE, warning=FALSE}
 
 # rm(list = ls())
 # .rs.restartR()
@@ -26,14 +25,14 @@ library("lubridate")
 
 # feature engineering and data prep
 library("recipes")
+library("caret")
+library("DMwR")
 
 # to explore missing data
 library("visdat")
 library("naniar")
 
 # modeling
-library("caret")
-library("DMwR")
 library("h2o")
 
 ```
@@ -52,7 +51,7 @@ sessionInfo()
 
 require("knitr")
 
-opts_knit$set(root.dir = "/Users/mdturse/Desktop/Analytics/Sparkfund/")
+opts_knit$set(root.dir = "/Users/mdturse/Desktop/Analytics/hard_drive_failure/")
 
 ```
   
@@ -126,7 +125,7 @@ fpath <-
 ```
   
     
-  Read in the .csv files and save it as one .rds file.
+  Read in the .csv files and stack them into a single .rds file.
 ```{r message=FALSE}
 
 hd <-
@@ -240,9 +239,6 @@ summary(hd2)
 hd2 %>% 
   count(manu, model2, serial_number) %>% 
   arrange(desc(n))
-
-# View(hd2 %>% filter(model == "13H2B97AS"))
-
 
 hd2 %>% 
   count(manu) %>% 
@@ -431,8 +427,7 @@ rec_obj <- recipe(failure ~ ., data = hd2_train)
 rec_steps <-
   rec_obj %>% 
   step_shuffle(all_predictors()) %>% 
-  step_nzv(all_predictors()) %>%  # helps reduce the number of variables with many NA values
-  # step_sqrt(all_numeric()) %>%  # puts less emphasis on "outliers"
+  step_nzv(all_predictors()) %>%  # helps reduce the number of variables with near zero variance (including NA values)
   step_log(all_predictors(), offset = 1) %>%  # puts less emphasis on "outliers"
   step_center(all_predictors()) %>%
   step_scale(all_predictors()) %>% 
@@ -471,7 +466,7 @@ summary(test_data)
 ```
   
     
-  Add `weight_col`, as this is a potential parameter to be used. The vlaue of 100 is arbitrarily chosen to make predicting `failure` more important than `non_failure`.
+  Add `weight_col`, as this is a potential parameter to be used. The vlaue of 100 is arbitrarily chosen to make predicting `failure` 100 times more important than predicting `non_failure`.
 ```{r}
 
 train_data <-
@@ -823,11 +818,10 @@ automl_models_h2o <-
              # balance_classes = TRUE,
              balance_classes = FALSE,
              weights_column = "weight_col",
-             max_runtime_secs = 3600, #3600, # 1 hour
-             # max_runtime_secs = 60, # 1 hour
+             max_runtime_secs = 3600, # 1 hour
+             # max_runtime_secs = 60,
              max_models = 10,
-             # stopping_metric = "deviance", # ? AUTO ?
-             stopping_metric = "AUTO", # ? AUTO ?
+             stopping_metric = "AUTO",
              seed = 123456789
              )
 
@@ -973,14 +967,6 @@ confusionMatrix(data = error_tbl_h2o$pred,
                 positive = "1",
                 mode = "everything"
                 )
-
-# twoClassSummary(data = error_tbl_h2o %>% select(obs, pred, p0, p1),
-#                 lev = levels(error_tbl_h2o$obs)
-#                 )
-
-# postResample(pred = error_tbl_h2o$pred,
-#              obs = error_tbl_h2o$obs
-#              )
 
 
 # save as a .rds file
